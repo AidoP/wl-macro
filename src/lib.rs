@@ -32,8 +32,13 @@ pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::Tok
     let enum_name = &item.ident.clone();
     let copyrights = protocols.iter().map(|p| {
         let protocol = format!("# {} - Copyright", p.name);
+        let summary = p.summary.as_ref().map(|s| quote! {#[doc = #s]}).unwrap_or(quote! {});
+        let description = p.description.as_ref().map(|s| quote! {#[doc = #s]}).unwrap_or(quote! {});
         p.copyright.as_ref().map(|copyright| quote! {
             #[doc = #protocol]
+            #summary
+            #description
+            #[doc = ""]
             #[doc = #copyright]
         }).unwrap_or_default()
     });
