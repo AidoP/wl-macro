@@ -10,6 +10,8 @@ use serde::Deserialize;
 #[derive(Debug, Deserialize)]
 pub struct Protocol {
     pub name: String,
+    pub summary: Option<String>,
+    pub description: Option<String>,
     pub copyright: Option<String>,
     #[serde(rename = "interface", default)]
     pub interfaces: Vec<Interface>
@@ -30,17 +32,18 @@ impl Protocol {
     }
     pub fn load<P: AsRef<Path>>(named: &str) -> Self {
         let mut protocol = String::new();
-        let mut file = File::open(Self::default_path(named)).expect("Unable to open protocol specification file");
-        file.read_to_string(&mut protocol).expect("Unable to read protocol specification file");
-        Self::from_str(&protocol).expect("Failed to parse protocol specification file")
+        let path = &Self::default_path(named);
+        let mut file = File::open(path).unwrap_or_else(|error| panic!("Unable to open protocol specification file {:?}: {:?}", path, error));
+        file.read_to_string(&mut protocol).unwrap_or_else(|error| panic!("Unable to read protocol specification file {:?}: {:?}", path, error));
+        Self::from_str(&protocol).unwrap_or_else(|error| panic!("Failed to parse protocol specification file {:?}: {:?}", path, error))
     }
 }
 
 #[derive(Clone, Debug, Deserialize)]
 pub struct Interface {
     pub name: String,
-    pub summary: String,
-    pub description: String,
+    pub summary: Option<String>,
+    pub description: Option<String>,
     pub version: u16,
     #[serde(rename = "enum", default)]
     pub enums: Vec<Enum>,
@@ -53,6 +56,8 @@ pub struct Interface {
 #[derive(Clone, Debug, Deserialize)]
 pub struct Enum {
     pub name: String,
+    pub summary: Option<String>,
+    pub description: Option<String>,
     pub since: Option<u16>,
     #[serde(rename = "entry", default)]
     pub entries: Vec<Entry>
@@ -63,7 +68,8 @@ pub struct Request {
     pub since: Option<u16>,
     #[serde(default)]
     pub destructor: bool,
-    pub description: String,
+    pub summary: Option<String>,
+    pub description: Option<String>,
     #[serde(rename = "arg", default)]
     pub args: Vec<Arg>
 }
@@ -71,7 +77,8 @@ pub struct Request {
 pub struct Event {
     pub name: String,
     pub since: Option<u16>,
-    pub description: String,
+    pub summary: Option<String>,
+    pub description: Option<String>,
     #[serde(rename = "arg", default)]
     pub args: Vec<Arg>
 }
@@ -97,6 +104,8 @@ pub struct Arg {
     #[serde(rename = "type")]
     pub kind: DataType,
     pub interface: Option<String>,
+    #[serde(rename = "enum")]
+    pub enumeration: Option<String>,
     pub summary: Option<String>
 }
 

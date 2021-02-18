@@ -7,29 +7,36 @@ use syn::{AttributeArgs, Ident, ItemEnum, Lit, NestedMeta, parse_macro_input, sp
 mod protocol;
 use protocol::Protocol;
 
-fn get_protocol(attributes: AttributeArgs) -> Protocol {
-    if let NestedMeta::Lit(Lit::Str(path)) = &attributes[0] {
-        Protocol::load::<&str>(path.value().as_str())
-    } else {
-        panic!("Expected a string literal attribute argument for the protocol path")
+fn get_protocol(attributes: AttributeArgs) -> Vec<Protocol> {
+    let mut protocols = vec![];
+    for attribute in attributes {
+        if let NestedMeta::Lit(Lit::Str(path)) = attribute {
+            protocols.push(Protocol::load::<&str>(path.value().as_str()))
+        } else {
+            panic!("Attribute must be in the form `#[wl::server::protocol(\"name1\", \"name2\")]`")
+        }
     }
+    protocols
 }
 
 #[proc_macro_attribute]
 pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::TokenStream) -> proc_macro::TokenStream {
     let attributes = parse_macro_input!(attribute as AttributeArgs);
     let mut item = parse_macro_input!(item as ItemEnum);
-
-    if attributes.len() != 1 {
-        panic!("Attribute must be in the form #[server::protocol(\"protocol_name\")]")
-    }
-    let protocol = get_protocol(attributes);
+    let protocols = get_protocol(attributes);
     let mut interfaces = HashMap::new();
-    for interface in protocol.interfaces {
+    for interface in protocols.iter().map(|p| p.interfaces.iter()).flatten() {
         interfaces.insert(interface.name.clone(), interface.clone());
     }
 
     let enum_name = &item.ident.clone();
+    let copyrights = protocols.iter().map(|p| {
+        let protocol = format!("# {} - Copyright", p.name);
+        p.copyright.as_ref().map(|copyright| quote! {
+            #[doc = #protocol]
+            #[doc = #copyright]
+        }).unwrap_or_default()
+    });
 
     let display_variant = item.variants.iter().find(|v| v.attrs.iter().any(|a| a.path.get_ident().map_or(None, |i| Some(i.to_string())) == Some("display".into()))).expect("A variant must be tagged with the `#[display]` attribute");
     let display_variant_name = display_variant.ident.clone();
@@ -58,30 +65,14 @@ pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::Tok
             }
         }
     });
-    let types_trait = format_ident!("{}Types", item.ident);
-    let interface_types = item.variants.iter().map(|v| {
-        let interface_type = &v.ident;
-        quote! {
-            type #interface_type: #interface_type;
-        }
-    });
-    let interface_type_assignments = item.variants.iter().map(|v| {
-        let mut fields = v.fields.iter();
-        let ty = &fields.next().unwrap_or_else(|| panic!("Variant `{}` requires an unnamed field specifying the concrete interface type", v.ident.to_string())).ty;
-        if fields.next().is_some() {
-            panic!("Variant `{}` must have exactly one unnamed field", v.ident.to_string())
-        }
-        let interface_type = &v.ident;
-        quote! {
-            type #interface_type = wl::server::Lease<#ty>;
-        }
-    });
 
     let args_getter = Ident::new("args", enum_name.span());
 
     let variant_dispatch = item.variants.iter()
         .map(|v| {
-            let interface = &interfaces[&heck::SnakeCase::to_snake_case(v.ident.to_string().as_str())];
+            let interface_name = &heck::SnakeCase::to_snake_case(v.ident.to_string().as_str());
+            let interface = &interfaces.get(interface_name)
+                .unwrap_or_else(|| panic!("Interface `{}` not found in the specified protocols", interface_name));
             let interface_name = &v.ident.to_string();
             (0u16 .. interface.requests.len() as u16)
                 .map(|i| {
@@ -162,10 +153,15 @@ pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::Tok
         });
     let interface_traits = item.variants.iter()
         .map(|v| {
-            let interface_name = heck::SnakeCase::to_snake_case(v.ident.to_string().as_str());
-            let interface = &interfaces[&interface_name];
+            let interface_name = &heck::SnakeCase::to_snake_case(v.ident.to_string().as_str());
+            let interface = &interfaces.get(interface_name)
+                .unwrap_or_else(|| panic!("Interface `{}` not found in the specified protocols", interface_name));
             let interface_trait = Ident::new(v.ident.to_string().as_str(), v.ident.span());
+            let summary = &interface.summary;
+            let description = &interface.description;
             let requests = interface.requests.iter().map(|r| {
+                let summary = r.summary.as_ref().map(|s| quote!{ #[doc = #s]}).unwrap_or_default();
+                let description = &r.description;
                 let request_fn = Ident::new(&r.name, v.ident.span());
                 let args = r.args.iter().map(|a| {
                     let arg_field = Ident::new(&a.name, v.ident.span());
@@ -200,6 +196,9 @@ pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::Tok
                     }
                 });
                 quote! {
+                    #summary
+                    #[doc = "# Description"]
+                    #[doc = #description]
                     fn #request_fn(self, client: &mut wl::server::Client<Protocol>, #(#args),*) -> Option<Self>;
                 }
             });
@@ -235,6 +234,8 @@ pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::Tok
                     };
                     quote! { #arg_ident: #arg_type }
                 });
+                let summary = e.summary.as_ref().map(|s| quote!{ #[doc = #s]}).unwrap_or_default();
+                let description = &e.description;
                 let msg = Ident::new("_internal_message", event_fn.span());
                 let arg_glue = e.args.iter().map(|a| {
                     let arg_ident = Ident::new(&a.name, event_fn.span());
@@ -252,6 +253,9 @@ pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::Tok
                 });
                 let opcode = opcode as u16;
                 quote! {
+                    #summary
+                    #[doc = "# Description"]
+                    #[doc = #description]
                     fn #event_fn(&mut self, client: &mut wl::server::Client<Protocol>, #(#args),*) -> wl::Result<()> {
                         let mut #msg = wl::Message {
                             object: self.id(),
@@ -264,6 +268,9 @@ pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::Tok
                 }
             });
             quote! {
+                #[doc = #summary]
+                #[doc = "# Description"]
+                #[doc = #description]
                 pub trait #interface_trait: wl::server::Object + Sized {
                     #(#requests)*
                     #(#events)*
@@ -271,10 +278,8 @@ pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::Tok
             }
         });
     
-    let m = (quote! {
-        trait #types_trait {
-            #(#interface_types)*
-        }
+    (quote! {
+        #(#copyrights)*
         #item
         impl Default for #enum_name {
             fn default() -> Self {
@@ -300,13 +305,8 @@ pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::Tok
                 }
             }
         }
-        impl #types_trait for Protocol {
-            #(#interface_type_assignments)*
-        }
         #( #into_protocol_impls )*
 
         #( #interface_traits )*
-    }).into();
-    println!("{}", m);
-    m
+    }).into()
 }
