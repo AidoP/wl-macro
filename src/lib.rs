@@ -104,16 +104,13 @@ pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::Tok
                                 })?;
                             },
                             NewId => if let Some(interface) = &a.interface {
+                                let interface_version = interfaces[interface].version as u32;
                                 quote! {
-                                    let #arg = wl::NewId::new(#args_getter.next_u32().ok_or(wl::DispatchError::ExpectedArgument("newid id"))?, #interface);
+                                    let #arg = wl::NewId::new(#args_getter.next_u32().ok_or(wl::DispatchError::ExpectedArgument("newid id"))?, #interface_version, #interface);
                                 }
                             } else {
                                 quote! {
-                                    let #arg = {
-                                        let interface = std::str::from_utf8(#args_getter.next_str().ok_or(wl::DispatchError::ExpectedArgument("generic newid interface"))?)
-                                            .map_err(|e| wl::DispatchError::Utf8Error(e, "Interface name for a generic new_id"))?;
-                                        wl::NewId::new(#args_getter.next_u32().ok_or(wl::DispatchError::ExpectedArgument("generic newid id"))?, interface)
-                                    };
+                                    let #arg = #args_getter.next_new_id()?;
                                 }
                             }
                         }
@@ -129,13 +126,14 @@ pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::Tok
                             _ => quote!{}
                         }
                     });
-                    let args = args.iter().map(|a| {
+                    let args: Vec<_> = args.iter().map(|a| {
                         let i = Ident::new(&a.name, v.span());
                         match a.kind {
                             protocol::DataType::Object => quote!{ &mut #i },
                             _ => quote! { #i }
                         }
-                    });
+                    }).collect();
+                    let debug_string = format!("-> {}@{{}}.{}({})", interface_name, request.to_string(), args.iter().map(|_| "{:?}, ").collect::<String>());
                     quote! {
                         (Self::#name(object), #i) => {
                             #( #lease_glue )*
@@ -143,6 +141,8 @@ pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::Tok
                                 Self::#name(object) => object,
                                 _ => unreachable!()
                             });
+                            #[cfg(debug_assertions)]
+                            println!(#debug_string, lease.id, #(#args),*);
                             let result = #name::#request(lease, client, #(#args),*);
                             #( #release_glue )*
                             Ok(result.map(|lease| lease.map(|object| Self::#name(object))))
@@ -256,6 +256,8 @@ pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::Tok
                         NewId => quote! { #msg.push_u32(#arg_ident) }
                     }
                 });
+                let debug_args = e.args.iter().map(|a| Ident::new(&a.name, event_fn.span()));
+                let debug_string = format!("<- {}@{{}}.{}({})", interface_name, event_fn.to_string(), e.args.iter().map(|_| "{:?}, ").collect::<String>());
                 let opcode = opcode as u16;
                 quote! {
                     #summary
@@ -268,6 +270,8 @@ pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::Tok
                             args: vec![]
                         };
                         #(#arg_glue;)*
+                        #[cfg(debug_assertions)]
+                        println!(#debug_string, self.id(), #(#debug_args),*);
                         client.send(#msg)
                     }
                 }
