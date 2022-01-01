@@ -71,7 +71,7 @@ pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::Tok
         }
     });
 
-    let args_getter = Ident::new("args", enum_name.span());
+    let args_getter = Ident::new("_args", enum_name.span());
 
     let variant_dispatch = item.variants.iter()
         .map(|v| {
@@ -95,7 +95,7 @@ pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::Tok
                             Fixed => quote! { let #arg = #args_getter.next_fixed().ok_or(wl::DispatchError::ExpectedArgument("fixed"))?; },
                             String => quote! { let #arg = #args_getter.next_str().ok_or(wl::DispatchError::ExpectedArgument("string"))?; },
                             Array => quote! { let #arg = #args_getter.next_array().ok_or(wl::DispatchError::ExpectedArgument("array"))?; },
-                            Fd => quote! { ! },
+                            Fd => quote! { let #arg = client.next_fd()?; },
                             Object => quote! {
                                 let #arg_lease = client.lease(#args_getter.next_u32().ok_or(wl::DispatchError::ExpectedArgument("object"))?)?;
                                 let #arg = #arg_lease.try_map(|p| match p {
@@ -177,7 +177,7 @@ pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::Tok
                         Fixed => quote! { wl::Fixed },
                         Array => quote! { &[u8] },
                         String => quote! { &[u8] },
-                        Fd => quote! { ! },
+                        Fd => quote! { i32 },
                         Object => {
                             if let Some(interface_name) = a.interface.clone() {
                                 let interface = item.variants.iter()
@@ -218,7 +218,7 @@ pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::Tok
                         Fixed => quote! { wl::Fixed },
                         Array => quote! { &[u8] },
                         String => quote! { &str },
-                        Fd => quote! { ! },
+                        Fd => quote! { i32 },
                         Object => {
                             if let Some(interface_name) = a.interface.clone() {
                                 let interface = item.variants.iter()
