@@ -44,7 +44,7 @@ pub struct Interface {
     pub name: String,
     pub summary: Option<String>,
     pub description: Option<String>,
-    pub version: u16,
+    pub version: u32,
     #[serde(rename = "enum", default)]
     pub enums: Vec<Enum>,
     #[serde(rename = "request", default)]
@@ -58,14 +58,14 @@ pub struct Enum {
     pub name: String,
     pub summary: Option<String>,
     pub description: Option<String>,
-    pub since: Option<u16>,
+    pub since: Option<u32>,
     #[serde(rename = "entry", default)]
     pub entries: Vec<Entry>
 }
 #[derive(Clone, Debug, Deserialize)]
 pub struct Request {
     pub name: String,
-    pub since: Option<u16>,
+    pub since: Option<u32>,
     #[serde(default)]
     pub destructor: bool,
     pub summary: Option<String>,
@@ -76,7 +76,7 @@ pub struct Request {
 #[derive(Clone, Debug, Deserialize)]
 pub struct Event {
     pub name: String,
-    pub since: Option<u16>,
+    pub since: Option<u32>,
     pub summary: Option<String>,
     pub description: Option<String>,
     #[serde(rename = "arg", default)]
@@ -86,7 +86,7 @@ pub struct Event {
 #[derive(Clone, Debug, Deserialize)]
 pub struct Entry {
     pub name: String,
-    pub since: Option<u16>,
+    pub since: Option<u32>,
     pub summary: Option<String>,
     pub description: Option<String>,
     pub value: u32
@@ -108,6 +108,15 @@ pub struct Arg {
     pub enumeration: Option<String>,
     pub summary: Option<String>
 }
+impl Arg {
+    pub fn is_dyn_new_id(&self) -> bool {
+        if let DataType::NewId = self.kind {
+            self.interface.is_none()
+        } else {
+            false
+        }
+    }
+}
 
 #[derive(Copy, Clone, Debug, Deserialize)]
 #[serde(rename_all = "snake_case")]
@@ -120,4 +129,53 @@ pub enum DataType {
     Fd,
     Object,
     NewId
+}
+impl DataType {
+    pub fn send_method(&self, arg: syn::Ident, interface: Option<syn::LitStr>) -> proc_macro2::TokenStream {
+        use quote::quote;
+        match self {
+            Self::Int => quote!{msg.push_i32(#arg)},
+            Self::Uint => quote!{msg.push_u32(#arg)},
+            Self::Fixed => quote!{msg.push_fixed(#arg)},
+            Self::String => quote!{msg.push_str(#arg)},
+            Self::Array => quote!{msg.push_array(#arg)},
+            Self::Fd => quote!{client.push_fd(#arg)},
+            Self::Object => quote!{msg.push_u32(#arg)},
+            Self::NewId => if let Some(_) = interface {
+                quote!{msg.push_new_id(#arg)}
+            } else {
+                quote!{msg.push_dynamic_new_id(#arg)}
+            },
+        }
+    }
+    pub fn get_method(&self, interface: Option<syn::LitStr>, version: u32) -> proc_macro2::TokenStream {
+        use quote::quote;
+        match self {
+            Self::Int => quote!{args.next_i32()?},
+            Self::Uint => quote!{args.next_u32()?},
+            Self::Fixed => quote!{args.next_fixed()?},
+            Self::String => quote!{args.next_str()?},
+            Self::Array => quote!{args.next_array()?},
+            Self::Fd => quote!{client.next_fd()?},
+            Self::Object => quote!{args.next_u32()?},
+            Self::NewId => if let Some(_) = interface {
+                quote!{args.next_new_id(#interface, #version)?}
+            } else {
+                quote!{args.next_dynamic_new_id()?}
+            },
+        }
+    }
+    pub fn data_type(&self, _: proc_macro2::Span) -> syn::Type {
+        use syn::parse_quote;
+        match self {
+            Self::Int => parse_quote!{ i32 },
+            Self::Uint => parse_quote!{ u32 },
+            Self::Fixed => parse_quote!{ wl::Fixed },
+            Self::String => parse_quote!{ std::string::String },
+            Self::Array => parse_quote!{ wl::Array },
+            Self::Fd => parse_quote!{ wl::Fd },
+            Self::Object => parse_quote!{ u32 },
+            Self::NewId => parse_quote!{ wl::NewId }
+        }
+    }
 }
