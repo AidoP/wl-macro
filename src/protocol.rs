@@ -4,6 +4,9 @@ use std::{
     path::{Path, PathBuf},
 };
 use serde::Deserialize;
+use proc_macro2::{Span, TokenStream};
+use quote::quote;
+use syn::Type;
 
 // Note: owned strings are required as TOML allows string normalisation
 
@@ -109,11 +112,70 @@ pub struct Arg {
     pub summary: Option<String>
 }
 impl Arg {
-    pub fn is_dyn_new_id(&self) -> bool {
-        if let DataType::NewId = self.kind {
-            self.interface.is_none()
-        } else {
-            false
+    pub fn get_method(&self, version: u32) -> proc_macro2::TokenStream {
+        match self.kind {
+            DataType::Int => quote!{args.next_i32()?},
+            DataType::Uint => quote!{args.next_u32()?},
+            DataType::Fixed => quote!{args.next_fixed()?},
+            DataType::String => quote!{args.next_str()?},
+            DataType::Array => quote!{args.next_array()?},
+            DataType::Fd => quote!{client.next_fd()?},
+            DataType::Object => quote!{client.get_any(args.next_u32()?)?},
+            DataType::NewId => if let Some(interface) = &self.interface {
+                quote!{args.next_new_id(#interface, #version)?}
+            } else {
+                quote!{args.next_dynamic_new_id()?}
+            },
+        }
+    }
+    pub fn send_method(&self, span: Span) -> proc_macro2::TokenStream {
+        let arg = syn::Ident::new(&self.name, span);
+        match self.kind {
+            DataType::Int => quote!{msg.push_i32(#arg)},
+            DataType::Uint => quote!{msg.push_u32(#arg)},
+            DataType::Fixed => quote!{msg.push_fixed(#arg)},
+            DataType::String => quote!{msg.push_str(#arg)},
+            DataType::Array => quote!{msg.push_array(#arg)},
+            DataType::Fd => quote!{client.push_fd(#arg)},
+            DataType::Object => quote!{{use wl::Object; msg.push_u32(#arg.object())}},
+            DataType::NewId => if let Some(_) = self.interface {
+                quote!{msg.push_new_id(#arg)}
+            } else {
+                quote!{msg.push_dynamic_new_id(#arg)}
+            },
+        }
+    }
+    pub fn event_data_type(&self, _: Span) -> syn::Type {
+        use syn::parse_quote;
+        match self.kind {
+            DataType::Int => parse_quote!{ i32 },
+            DataType::Uint => parse_quote!{ u32 },
+            DataType::Fixed => parse_quote!{ wl::Fixed },
+            DataType::String => parse_quote!{ std::string::String },
+            DataType::Array => parse_quote!{ wl::Array },
+            DataType::Fd => parse_quote!{ wl::Fd },
+            DataType::Object => parse_quote!{&mut (dyn Object + 'static)},
+            DataType::NewId => parse_quote!{ wl::NewId }
+        }
+    }
+    pub fn data_type(&self, _: Span) -> syn::Type {
+        use syn::parse_quote;
+        match self.kind {
+            DataType::Int => parse_quote!{ i32 },
+            DataType::Uint => parse_quote!{ u32 },
+            DataType::Fixed => parse_quote!{ wl::Fixed },
+            DataType::String => parse_quote!{ std::string::String },
+            DataType::Array => parse_quote!{ wl::Array },
+            DataType::Fd => parse_quote!{ wl::Fd },
+            DataType::Object => parse_quote!{ wl::server::Lease<dyn std::any::Any> },
+            DataType::NewId => parse_quote!{ wl::NewId }
+        }
+    }
+    pub fn debug_string(&self) -> &'static str {
+        match self.kind {
+            DataType::NewId if self.interface.is_none() => "dyn {}",
+            DataType::String => "{:?}",
+            _ => "{}"
         }
     }
 }
@@ -129,53 +191,4 @@ pub enum DataType {
     Fd,
     Object,
     NewId
-}
-impl DataType {
-    pub fn send_method(&self, arg: syn::Ident, interface: Option<syn::LitStr>) -> proc_macro2::TokenStream {
-        use quote::quote;
-        match self {
-            Self::Int => quote!{msg.push_i32(#arg)},
-            Self::Uint => quote!{msg.push_u32(#arg)},
-            Self::Fixed => quote!{msg.push_fixed(#arg)},
-            Self::String => quote!{msg.push_str(#arg)},
-            Self::Array => quote!{msg.push_array(#arg)},
-            Self::Fd => quote!{client.push_fd(#arg)},
-            Self::Object => quote!{msg.push_u32(#arg)},
-            Self::NewId => if let Some(_) = interface {
-                quote!{msg.push_new_id(#arg)}
-            } else {
-                quote!{msg.push_dynamic_new_id(#arg)}
-            },
-        }
-    }
-    pub fn get_method(&self, interface: Option<syn::LitStr>, version: u32) -> proc_macro2::TokenStream {
-        use quote::quote;
-        match self {
-            Self::Int => quote!{args.next_i32()?},
-            Self::Uint => quote!{args.next_u32()?},
-            Self::Fixed => quote!{args.next_fixed()?},
-            Self::String => quote!{args.next_str()?},
-            Self::Array => quote!{args.next_array()?},
-            Self::Fd => quote!{client.next_fd()?},
-            Self::Object => quote!{args.next_u32()?},
-            Self::NewId => if let Some(_) = interface {
-                quote!{args.next_new_id(#interface, #version)?}
-            } else {
-                quote!{args.next_dynamic_new_id()?}
-            },
-        }
-    }
-    pub fn data_type(&self, _: proc_macro2::Span) -> syn::Type {
-        use syn::parse_quote;
-        match self {
-            Self::Int => parse_quote!{ i32 },
-            Self::Uint => parse_quote!{ u32 },
-            Self::Fixed => parse_quote!{ wl::Fixed },
-            Self::String => parse_quote!{ std::string::String },
-            Self::Array => parse_quote!{ wl::Array },
-            Self::Fd => parse_quote!{ wl::Fd },
-            Self::Object => parse_quote!{ u32 },
-            Self::NewId => parse_quote!{ wl::NewId }
-        }
-    }
 }

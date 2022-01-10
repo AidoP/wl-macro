@@ -54,7 +54,7 @@ pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::Tok
         let event_fn_lit = event.name.clone();
         let args = event.args.iter().map(|arg| {
             let ident = Ident::new(&arg.name, item.span());
-            let ty = arg.kind.data_type(item.span());
+            let ty = arg.event_data_type(item.span());
             quote!{
                 #ident: #ty
             }
@@ -66,8 +66,7 @@ pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::Tok
             }
         });
         let args_send_method = event.args.iter().map(|arg| {
-            let ident = Ident::new(&arg.name, item.span());
-            let method = arg.kind.send_method(ident, arg.interface.clone().map(|n| syn::LitStr::new(&n, item.span())));
+            let method = arg.send_method(item.span());
             quote!{
                 #method
             }
@@ -78,11 +77,7 @@ pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::Tok
             if !first {
                 args_debug_string.push_str(", ");
             }
-            if arg.is_dyn_new_id() {
-                args_debug_string.push_str("dyn {}");
-            } else {
-                args_debug_string.push_str("{}");
-            }
+            args_debug_string.push_str(arg.debug_string());
             first = false;
         }
         args_debug_string.push(')');
@@ -112,7 +107,7 @@ pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::Tok
         let request_name = Ident::new(&request.name, request_impl.sig.ident.span());
         let args = request.args.iter().map(|arg| {
             let ident = Ident::new(&arg.name, request_impl.span());
-            let ty = arg.kind.data_type(request_impl.span());
+            let ty = arg.data_type(request_impl.span());
             quote!{
                 #ident: #ty
             }
@@ -137,7 +132,7 @@ pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::Tok
         let request_fn_lit = request.name.clone();
         let arg_defs = request.args.iter().map(|arg| {
             let ident = Ident::new(&arg.name, request_impl.span());
-            let get = arg.kind.get_method(arg.interface.clone().map(|n| syn::LitStr::new(&n, item.span())), interface_version);
+            let get = arg.get_method(interface_version);
             quote!{
                 let #ident = #get;
             }
@@ -154,11 +149,7 @@ pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::Tok
             if !first {
                 args_debug_string.push_str(", ");
             }
-            if arg.is_dyn_new_id() {
-                args_debug_string.push_str("dyn {}");
-            } else {
-                args_debug_string.push_str("{}");
-            }
+            args_debug_string.push_str(arg.debug_string());
             first = false;
         }
         args_debug_string.push(')');
