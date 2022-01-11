@@ -48,6 +48,30 @@ pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::Tok
         _ => panic!("Interface must be implemented for Lease<T>")
     };
 
+    let enum_entries = interface.enums.iter().map(|e| {
+        let enum_ident = Ident::new(&heck::CamelCase::to_camel_case(format!("{}_enum_{}", interface_name, e.name).as_str()), item.span());
+        let entries = e.entries.iter().map(|entry| {
+            let mut entry_name = entry.name.clone();
+            if entry_name.chars().next().map(|c| !c.is_alphabetic()).unwrap_or(true) {
+                entry_name = format!("{}_{}", e.name, entry_name);
+            }
+            let entry_ident = Ident::new(&heck::ShoutySnakeCase::to_shouty_snake_case(entry_name.as_str()), item.span());
+            let value = entry.value;
+            let description = entry.description.clone().unwrap_or_else(|| entry.summary.clone().unwrap_or_else(|| format!("{}::{}::{}", interface_name, e.name, entry.name)));
+            quote!{
+                #[doc = #description]
+                const #entry_ident: u32 = #value;
+            }
+        });
+        quote!{
+            #[repr(transparent)]
+            #[derive(Debug, Copy, Clone, PartialEq, Eq)]
+            struct #enum_ident(u32);
+            impl #enum_ident {
+                #(#entries)*
+            }
+        }
+    });
     let event_impls = interface.events.iter().enumerate().map(|(opcode, event)| {
         let opcode = opcode as u16;
         let event_name = Ident::new(&event.name, item.span());
@@ -96,7 +120,7 @@ pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::Tok
     let request_sigs = interface.requests.iter().map(|request| {
         let request_impl = item.items.iter()
             .find_map(|i| if let syn::ImplItem::Method(method) = i {
-                if method.sig.ident == request.name {
+                if quote::format_ident!("{}", method.sig.ident) == request.name {
                     Some(method)
                 } else {
                     None
@@ -104,7 +128,7 @@ pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::Tok
             } else {
                 None
             }).expect(&format!("Request {:?} must be implemented", request.name));
-        let request_name = Ident::new(&request.name, request_impl.sig.ident.span());
+        let request_ident = request_impl.sig.ident.clone();
         let args = request.args.iter().map(|arg| {
             let ident = Ident::new(&arg.name, request_impl.span());
             let ty = arg.data_type(request_impl.span());
@@ -113,14 +137,14 @@ pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::Tok
             }
         });
         quote!{
-            fn #request_name(&mut self, client: &mut wl::server::Client, #(#args),*) -> wl::Result<()>;
+            fn #request_ident(&mut self, client: &mut wl::server::Client, #(#args),*) -> wl::Result<()>;
         }
     });
     let request_dispatch = interface.requests.iter().enumerate().map(|(opcode, request)| {
         let opcode = opcode as u16;
         let request_impl = item.items.iter()
             .find_map(|i| if let syn::ImplItem::Method(method) = i {
-                if method.sig.ident == request.name {
+                if quote::format_ident!("{}", method.sig.ident) == request.name {
                     Some(method)
                 } else {
                     None
@@ -128,7 +152,7 @@ pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::Tok
             } else {
                 None
             }).expect(&format!("Request {:?} must be implemented", request.name));
-        let request_fn = Ident::new(&request.name, request_impl.sig.ident.span());
+        let request_fn = request_impl.sig.ident.clone();
         let request_fn_lit = request.name.clone();
         let arg_defs = request.args.iter().map(|arg| {
             let ident = Ident::new(&arg.name, request_impl.span());
@@ -188,5 +212,6 @@ pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::Tok
                 lease.init(client)
             }*/
         }
+        #(#enum_entries)*
     }.into()
 }

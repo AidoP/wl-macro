@@ -4,9 +4,8 @@ use std::{
     path::{Path, PathBuf},
 };
 use serde::Deserialize;
-use proc_macro2::{Span, TokenStream};
+use proc_macro2::Span;
 use quote::quote;
-use syn::Type;
 
 // Note: owned strings are required as TOML allows string normalisation
 
@@ -120,7 +119,11 @@ impl Arg {
             DataType::String => quote!{args.next_str()?},
             DataType::Array => quote!{args.next_array()?},
             DataType::Fd => quote!{client.next_fd()?},
-            DataType::Object => quote!{client.get_any(args.next_u32()?)?},
+            DataType::Object => if let Some(_) = &self.interface {
+                quote!{&mut client.get(args.next_u32()?)?}
+            } else {
+                quote!{client.get_any(args.next_u32()?)?}
+            },
             DataType::NewId => if let Some(interface) = &self.interface {
                 quote!{args.next_new_id(#interface, #version)?}
             } else {
@@ -154,11 +157,11 @@ impl Arg {
             DataType::String => parse_quote!{ std::string::String },
             DataType::Array => parse_quote!{ wl::Array },
             DataType::Fd => parse_quote!{ wl::Fd },
-            DataType::Object => parse_quote!{&mut (dyn Object + 'static)},
+            DataType::Object => parse_quote!{&mut (dyn wl::Object + 'static)},
             DataType::NewId => parse_quote!{ wl::NewId }
         }
     }
-    pub fn data_type(&self, _: Span) -> syn::Type {
+    pub fn data_type(&self, span: Span) -> syn::Type {
         use syn::parse_quote;
         match self.kind {
             DataType::Int => parse_quote!{ i32 },
@@ -167,7 +170,12 @@ impl Arg {
             DataType::String => parse_quote!{ std::string::String },
             DataType::Array => parse_quote!{ wl::Array },
             DataType::Fd => parse_quote!{ wl::Fd },
-            DataType::Object => parse_quote!{ wl::server::Lease<dyn std::any::Any> },
+            DataType::Object => if let Some(interface) = &self.interface {
+                let interface_ty = syn::Ident::new(&heck::CamelCase::to_camel_case(interface.as_str()), span);
+                parse_quote!{ &mut dyn #interface_ty }
+            } else {
+                parse_quote!{ wl::server::Lease<dyn std::any::Any> }
+            },
             DataType::NewId => parse_quote!{ wl::NewId }
         }
     }
