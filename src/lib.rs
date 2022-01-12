@@ -4,7 +4,7 @@ use quote::{quote, format_ident};
 use syn::{parse_macro_input, parse::{Parse, ParseStream}, punctuated::Punctuated, LitStr, Visibility, Token, Ident, Path, braced, spanned::Spanned};
 use proc_macro2::TokenStream;
 
-use heck::{CamelCase, SnakeCase};
+use heck::{CamelCase, SnakeCase, ShoutySnakeCase};
 
 mod protocol;
 use protocol::*;
@@ -85,6 +85,7 @@ pub fn server_protocol(attr: proc_macro::TokenStream, item: proc_macro::TokenStr
     let interfaces = protocol.interfaces.iter()
         .filter(|interface| bindings.contains_key(&interface.name.to_snake_case()))
         .map(|interface| generate_interface(interface, bindings));
+    let enums = protocol.interfaces.iter().map(|interface| generate_enums(interface));
 
     let interface_not_found_errors = bindings.iter().filter_map(|(interface, binding)|
         if protocol.interfaces.iter().find(|known_interface| interface.to_snake_case() == known_interface.name.to_snake_case()).is_some() {
@@ -99,8 +100,9 @@ pub fn server_protocol(attr: proc_macro::TokenStream, item: proc_macro::TokenStr
         #module_visibility mod #module_name {
             #(#interface_not_found_errors)*
             pub const PROTOCOL: &'static str = #protocol_name;
-            #(pub const COPYRIGHT: &'static str = #protocol_copyright)*;
+            #(pub const COPYRIGHT: &'static str = #protocol_copyright;)*
             #(#interfaces)*
+            #(#enums)*
         }
     }.into()
 }
@@ -125,13 +127,18 @@ fn generate_interface(interface: &Interface, bindings: &HashMap<String, Path>) -
         impl ::wl::server::Dispatch for #implementor_struct {
             const INTERFACE: &'static str = #interface_string;
             const VERSION: u32 = #interface_version;
-            fn dispatch(lease: ::wl::server::Lease<dyn ::std::any::Any>, client: &mut ::wl::server::Client, message: ::wl::Message) -> ::wl::Result<()> {
+            fn dispatch(lease: ::wl::server::Lease<dyn ::std::any::Any>, client: &mut ::wl::server::Client, message: ::wl::Message) -> ::wl::server::Result<()> {
                 use ::wl::Object;
+                use ::std::convert::Into;
                 let mut lease: ::wl::server::Lease<#implementor_struct> = lease.downcast().unwrap();
                 let mut args = message.args();
                 match message.opcode {
                     #(#request_dispatch)*
-                    _ => Err(::wl::DispatchError::InvalidOpcode(lease.object(), message.opcode, Self::INTERFACE))
+                    _ => Err(::wl::DispatchError::InvalidRequest {
+                        opcode: message.opcode,
+                        object: lease.object(),
+                        interface: Self::INTERFACE
+                    }.into())
                 }
             }
         }
@@ -144,7 +151,7 @@ fn generate_event(event: &Event, interface: &Interface, opcode: u16) -> TokenStr
     let debug_print = generate_event_debug_print(event, interface);
     let arg_pushers = event.args.iter().map(|arg| arg.pusher());
     quote! {
-        fn #event_name(&mut self, client: &mut ::wl::server::Client, #(#parameters),*) -> ::wl::Result<()> {
+        fn #event_name(&mut self, client: &mut ::wl::server::Client, #(#parameters),*) -> ::wl::server::Result<()> {
             use ::wl::Object;
             if *::wl::DEBUG {
                 #debug_print
@@ -188,7 +195,7 @@ fn generate_request(request: &Request) -> TokenStream {
     let request_name = format_ident!("{}", request.name.to_snake_case());
     let parameters = request.args.iter().map(|arg| generate_parameter(arg));
     quote! {
-        fn #request_name(&mut self, client: &mut ::wl::server::Client, #(#parameters),*) -> ::wl::Result<()>;
+        fn #request_name(&mut self, client: &mut ::wl::server::Client, #(#parameters),*) -> ::wl::server::Result<()>;
     }
 }
 fn generate_parameter(arg: &Arg) -> TokenStream {
@@ -242,5 +249,60 @@ fn generate_request_debug_print(request: &Request, interface: &Interface) -> Tok
     format_string.push(')');
     quote! {
         ::std::eprintln!(#format_string, #interface_name, lease.object(), #request_name, #(#args),*)
+    }
+}
+fn generate_enums(interface: &Interface) -> TokenStream {
+    let enums = interface.enums.iter().map(|e| generate_enum(e, interface));
+    quote! {
+        #(#enums)*
+    }
+}
+fn generate_enum(e: &Enum, interface: &Interface) -> TokenStream {
+    let enum_name = format_ident!("{}{}", interface.name.to_camel_case(), e.name.to_camel_case());
+    let enum_wl_name = format!("{}.{}", interface.name, e.name);
+    let normalise_entry_name = |name: &str| if name.chars().next().map(|c| c.is_alphabetic()).unwrap_or(false) {
+        name.to_shouty_snake_case()
+    } else {
+        format!("{}_{}", interface.name.to_shouty_snake_case(), name.to_shouty_snake_case())
+    };
+    let entries = e.entries.iter().map(|entry| {
+        let entry_name = format_ident!("{}", normalise_entry_name(&entry.name));
+        let value = entry.value;
+        quote!{
+            pub const #entry_name: u32 = #value
+        }
+    });
+    let entry_constructors = e.entries.iter().map(|entry| {
+        let entry_name = format_ident!("{}", normalise_entry_name(&entry.name));
+        let value = entry.value;
+        quote!{
+            #value => Ok(Self(Self::#entry_name))
+        }
+    });
+    quote! {
+        #[derive(::std::fmt::Debug, ::std::marker::Copy, ::std::clone::Clone, ::std::cmp::Eq, ::std::cmp::PartialEq)]
+        pub struct #enum_name(u32);
+        impl #enum_name {
+            pub const NAME: &'static str = #enum_wl_name;
+            #(#entries;)*
+            pub fn new(value: u32) -> ::wl::server::Result<Self> {
+                use ::std::convert::Into;
+                match value {
+                    #(#entry_constructors,)*
+                    _ => Err(::wl::DispatchError::NoVariant { name: Self::NAME, variant: value }.into())
+                }
+            }
+        }
+        impl ::std::convert::Into<u32> for #enum_name {
+            fn into(self) -> u32 {
+                self.0
+            }
+        }
+        impl ::std::ops::Deref for #enum_name {
+            type Target = u32;
+            fn deref(&self) -> &Self::Target {
+                &self.0
+            }
+        }
     }
 }
