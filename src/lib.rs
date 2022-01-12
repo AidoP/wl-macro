@@ -1,217 +1,246 @@
-use std::ops::Deref;
+use std::collections::HashMap;
 
-use quote::{quote};
-use syn::{AttributeArgs, Ident, ItemImpl, Lit, NestedMeta, parse_macro_input, parse_quote, spanned::Spanned};
+use quote::{quote, format_ident};
+use syn::{parse_macro_input, parse::{Parse, ParseStream}, punctuated::Punctuated, LitStr, Visibility, Token, Ident, Path, braced, spanned::Spanned};
+use proc_macro2::TokenStream;
+
+use heck::{CamelCase, SnakeCase};
 
 mod protocol;
-use protocol::Protocol;
+use protocol::*;
 
-fn get_protocol(attributes: AttributeArgs) -> Protocol {
-    if attributes.len() == 1 {
-        if let NestedMeta::Lit(Lit::Str(path)) = attributes.first().unwrap() {
-            return Protocol::load::<&str>(path.value().as_str())
+struct ProtocolModule {
+    visibility: Visibility,
+    ident: Ident,
+    bindings: HashMap<String, Path>
+}
+impl Parse for ProtocolModule {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let visibility = input.parse()?;
+        let _: Token![mod] = input.parse()?;
+        let ident = input.parse()?;
+        let content;
+        let _ = braced!(content in input);
+        let mut bindings = HashMap::new();
+        let punctuated_bindings: Punctuated<Binding, Token![;]> = content.parse_terminated(Binding::parse)?;
+        for binding in punctuated_bindings {
+            let interface = binding.interface.to_string().to_snake_case();
+            if bindings.contains_key(&interface) {
+                panic!("Duplicate definition of interface {:?}", interface.to_camel_case());
+            }
+            bindings.insert(interface, binding.implementation);
         }
+        Ok(Self {
+            visibility,
+            ident,
+            bindings
+        })
     }
-    panic!("Attribute must be in the form `#[wl::server::protocol(\"specification.toml\")]`")
+}
+struct Binding {
+    interface: Ident,
+    implementation: Path
+}
+impl Parse for Binding {
+    fn parse(input: ParseStream) -> syn::Result<Self> {
+        let _: Token![type] = input.parse()?;
+        let interface = input.parse()?;
+        let _: Token![=] = input.parse()?;
+        let implementation = input.parse()?;
+        Ok(Self {
+            interface,
+            implementation
+        })
+    }
 }
 
 #[proc_macro_attribute]
-pub fn server_protocol(attribute: proc_macro::TokenStream, item: proc_macro::TokenStream) -> proc_macro::TokenStream {
-    let attributes = parse_macro_input!(attribute as AttributeArgs);
-    let item = parse_macro_input!(item as ItemImpl);
-    let (_, interface, _) = item.trait_.clone().expect("Attribute must be applied to an implementation of the desired interface");
-    let interface_ident = interface.get_ident().expect("Interface must be an identifier corresponding to the interface name in the specification file");
-    let interface_name = heck::SnakeCase::to_snake_case(interface_ident.to_string().as_str());
-    let interface_name_lit = syn::LitStr::new(&interface_name, interface_ident.span());
+/// Parses the wayland protocol specification, producing a set of interface traits inside a module named after the protocol
+/// ```rust
+/// use wl::{prelude::*, Result};
+/// protocol!("wayland.toml")
+/// 
+/// struct Display;
+/// #[dispatch]
+/// impl wayland::WlDisplay for Lease<WlDisplay> {
+///     fn sync(&mut self, client: &mut Client, id: NewId) -> Result<()> {
+///         todo!()
+///     }
+///     fn get_regsitry(&mut self, client: &mut Client, id: NewId) -> Result<()> {
+///         todo!()
+///     }
+/// }
+/// ```
+pub fn server_protocol(attr: proc_macro::TokenStream, item: proc_macro::TokenStream) -> proc_macro::TokenStream {
+    let path = parse_macro_input!(attr as LitStr).value();
+    let module = parse_macro_input!(item as ProtocolModule);
 
-    // TODO: A way to avoid re-parsing the protocol file each time
-    let protocol = get_protocol(attributes);
-    let interface = protocol.interfaces.iter()
-        .find(|i| i.name == interface_name)
-        .expect(&format!("No interface named {:?} was found.", interface_name));
-    let interface_version = interface.version;
+    let module_visibility = &module.visibility;
+    let module_name = &module.ident;
+    let bindings = &module.bindings;
 
-    let self_type = item.self_ty.clone();
-    let base_struct: syn::Path = match self_type.deref() {
-        syn::Type::Path(path) => {
-            let lease = path.path.segments.last().expect("Interface must be implemented for Lease<T>");
-            match &lease.arguments {
-                syn::PathArguments::AngleBracketed(args) => {
-                    let args = &args.args;
-                    parse_quote! {
-                        #args
-                    }
-                },
-                _ => panic!("Interface must be implemented for Lease<T>")
-            }
-        },
-        _ => panic!("Interface must be implemented for Lease<T>")
-    };
+    let protocol = Protocol::load::<&str>(&path);
+    let protocol_name = protocol.name.to_snake_case();
+    let protocol_copyright = protocol.copyright.iter();
+    let interfaces = protocol.interfaces.iter()
+        .filter(|interface| bindings.contains_key(&interface.name.to_snake_case()))
+        .map(|interface| generate_interface(interface, bindings));
 
-    let enum_entries = interface.enums.iter().map(|e| {
-        let enum_ident = Ident::new(&heck::CamelCase::to_camel_case(format!("{}_enum_{}", interface_name, e.name).as_str()), item.span());
-        let entries = e.entries.iter().map(|entry| {
-            let mut entry_name = entry.name.clone();
-            if entry_name.chars().next().map(|c| !c.is_alphabetic()).unwrap_or(true) {
-                entry_name = format!("{}_{}", e.name, entry_name);
-            }
-            let entry_ident = Ident::new(&heck::ShoutySnakeCase::to_shouty_snake_case(entry_name.as_str()), item.span());
-            let value = entry.value;
-            let description = entry.description.clone().unwrap_or_else(|| entry.summary.clone().unwrap_or_else(|| format!("{}::{}::{}", interface_name, e.name, entry.name)));
-            quote!{
-                #[doc = #description]
-                const #entry_ident: u32 = #value;
-            }
-        });
-        quote!{
-            #[repr(transparent)]
-            #[derive(Debug, Copy, Clone, PartialEq, Eq)]
-            struct #enum_ident(u32);
-            impl #enum_ident {
-                #(#entries)*
-            }
+    let interface_not_found_errors = bindings.iter().filter_map(|(interface, binding)|
+        if protocol.interfaces.iter().find(|known_interface| interface.to_snake_case() == known_interface.name.to_snake_case()).is_some() {
+            None
+        } else {
+            Some(syn::Error::new(binding.span(), format!("No interface named {:?}", interface.to_snake_case())).to_compile_error())
         }
-    });
-    let event_impls = interface.events.iter().enumerate().map(|(opcode, event)| {
-        let opcode = opcode as u16;
-        let event_name = Ident::new(&event.name, item.span());
-        let event_fn_lit = event.name.clone();
-        let args = event.args.iter().map(|arg| {
-            let ident = Ident::new(&arg.name, item.span());
-            let ty = arg.event_data_type(item.span());
-            quote!{
-                #ident: #ty
-            }
-        });
-        let args_debug = event.args.iter().map(|arg| {
-            let ident = Ident::new(&arg.name, item.span());
-            quote!{
-                #ident
-            }
-        });
-        let args_send_method = event.args.iter().map(|arg| {
-            let method = arg.send_method(item.span());
-            quote!{
-                #method
-            }
-        });
-        let mut args_debug_string = "-> {}@{}.{}(".to_string();
-        let mut first = true;
-        for arg in event.args.iter() {
-            if !first {
-                args_debug_string.push_str(", ");
-            }
-            args_debug_string.push_str(arg.debug_string());
-            first = false;
-        }
-        args_debug_string.push(')');
-        quote!{
-            fn #event_name(&mut self, client: &mut wl::server::Client, #(#args),*) -> wl::Result<()> {
-                use wl::Object;
-                if *wl::DEBUG {
-                    eprintln!(#args_debug_string, #interface_name_lit, self.object(), #event_fn_lit, #(#args_debug),*)
-                }
-                let mut msg = wl::Message::new(self.object(), #opcode);
-                #(#args_send_method;)*
-                client.send(msg)
-            }
-        }
-    });
-    let request_sigs = interface.requests.iter().map(|request| {
-        let request_impl = item.items.iter()
-            .find_map(|i| if let syn::ImplItem::Method(method) = i {
-                if quote::format_ident!("{}", method.sig.ident) == request.name {
-                    Some(method)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }).expect(&format!("Request {:?} must be implemented", request.name));
-        let request_ident = request_impl.sig.ident.clone();
-        let args = request.args.iter().map(|arg| {
-            let ident = Ident::new(&arg.name, request_impl.span());
-            let ty = arg.data_type(request_impl.span());
-            quote!{
-                #ident: #ty
-            }
-        });
-        quote!{
-            fn #request_ident(&mut self, client: &mut wl::server::Client, #(#args),*) -> wl::Result<()>;
-        }
-    });
-    let request_dispatch = interface.requests.iter().enumerate().map(|(opcode, request)| {
-        let opcode = opcode as u16;
-        let request_impl = item.items.iter()
-            .find_map(|i| if let syn::ImplItem::Method(method) = i {
-                if quote::format_ident!("{}", method.sig.ident) == request.name {
-                    Some(method)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }).expect(&format!("Request {:?} must be implemented", request.name));
-        let request_fn = request_impl.sig.ident.clone();
-        let request_fn_lit = request.name.clone();
-        let arg_defs = request.args.iter().map(|arg| {
-            let ident = Ident::new(&arg.name, request_impl.span());
-            let get = arg.get_method(interface_version);
-            quote!{
-                let #ident = #get;
-            }
-        });
-        let args: Vec<_> = request.args.iter().map(|arg| {
-            let ident = Ident::new(&arg.name, request_impl.span());
-            quote!{
-                #ident
-            }
-        }).collect();
-        let mut args_debug_string = "{}@{}.{}(".to_string();
-        let mut first = true;
-        for arg in request.args.iter() {
-            if !first {
-                args_debug_string.push_str(", ");
-            }
-            args_debug_string.push_str(arg.debug_string());
-            first = false;
-        }
-        args_debug_string.push(')');
-        quote!{
-            #opcode => {
-                #(#arg_defs)*
-                if *wl::DEBUG {
-                    use wl::Object;
-                    eprintln!(#args_debug_string, #interface_name_lit, lease.object(), #request_fn_lit, #(#args),*)
-                }
-                lease.#request_fn(client, #(#args),*)
-            }
-        }
-    });
+    );
 
     quote! {
-        #item
-        
-        trait #interface_ident: wl::Object {
-            //fn init(&mut self, client: &mut wl::server::Client) -> wl::Result<()>;
-            #(#event_impls)*
-            #(#request_sigs)*
+        #[allow(unused_variables)]
+        #module_visibility mod #module_name {
+            #(#interface_not_found_errors)*
+            pub const PROTOCOL: &'static str = #protocol_name;
+            #(pub const COPYRIGHT: &'static str = #protocol_copyright)*;
+            #(#interfaces)*
         }
-        impl wl::server::Dispatch for #base_struct {
-            const INTERFACE: &'static str = #interface_name_lit;
+    }.into()
+}
+
+fn generate_interface(interface: &Interface, bindings: &HashMap<String, Path>) -> TokenStream {
+    let interface_name = format_ident!("{}", interface.name.to_camel_case());
+    let interface_description = interface.description.iter();
+    let interface_version = interface.version;
+    let interface_string = &interface.name;
+    let implementor_struct = &bindings[interface_string];
+    let events = interface.events.iter().enumerate().map(|(opcode, event)| generate_event(event, interface, opcode as u16));
+    let requests = interface.requests.iter().map(|request| generate_request(request));
+    let request_dispatch = interface.requests.iter().enumerate().map(|(opcode, request)| generate_request_dispatch(request, opcode as u16, interface, bindings));
+    quote!{
+        #(#[doc = #interface_description])*
+        pub trait #interface_name: ::wl::Object {
             const VERSION: u32 = #interface_version;
-            fn dispatch(lease: wl::server::Lease<dyn std::any::Any>, client: &mut wl::server::Client, message: wl::Message) -> wl::Result<()>  {
-                let mut lease: wl::server::Lease<#base_struct> = lease.downcast().unwrap();
+            const INTERFACE: &'static str = #interface_string;
+            #(#events)*
+            #(#requests)*
+        }
+        impl ::wl::server::Dispatch for #implementor_struct {
+            const INTERFACE: &'static str = #interface_string;
+            const VERSION: u32 = #interface_version;
+            fn dispatch(lease: ::wl::server::Lease<dyn ::std::any::Any>, client: &mut ::wl::server::Client, message: ::wl::Message) -> ::wl::Result<()> {
+                use ::wl::Object;
+                let mut lease: ::wl::server::Lease<#implementor_struct> = lease.downcast().unwrap();
                 let mut args = message.args();
                 match message.opcode {
                     #(#request_dispatch)*
-                    _ => Err(wl::DispatchError::InvalidOpcode(message.object, message.opcode, Self::INTERFACE))
+                    _ => Err(::wl::DispatchError::InvalidOpcode(lease.object(), message.opcode, Self::INTERFACE))
                 }
             }
-            /*fn init(lease: &mut Lease<Self>, client: &mut wl::server::Client) -> wl::Result<()> {
-                lease.init(client)
-            }*/
         }
-        #(#enum_entries)*
-    }.into()
+    }
+}
+
+fn generate_event(event: &Event, interface: &Interface, opcode: u16) -> TokenStream {
+    let event_name = format_ident!("{}", event.name.to_snake_case());
+    let parameters = event.args.iter().map(|arg| generate_event_parameter(arg));
+    let debug_print = generate_event_debug_print(event, interface);
+    let arg_pushers = event.args.iter().map(|arg| arg.pusher());
+    quote! {
+        fn #event_name(&mut self, client: &mut ::wl::server::Client, #(#parameters),*) -> ::wl::Result<()> {
+            use ::wl::Object;
+            if *::wl::DEBUG {
+                #debug_print
+            }
+            let mut message = ::wl::Message::new(self.object(), #opcode);
+            #(#arg_pushers;)*
+            client.send(message)
+        }
+    }
+}
+fn generate_event_parameter(arg: &Arg) -> TokenStream {
+    let arg_name = format_ident!("wl_{}", arg.name.to_snake_case());
+    let arg_type = arg.event_data_type();
+    quote! {
+        #arg_name: #arg_type
+    }
+}
+fn generate_event_debug_print(event: &Event, interface: &Interface) -> TokenStream {
+    let interface_name = &interface.name;
+    let event_name = &event.name;
+    let args = event.args.iter().map(|arg| {
+        let arg_name = format_ident!("wl_{}", arg.name);
+        quote!{#arg_name}
+    });
+    let mut format_string = "-> {}@{}.{}(".to_string();
+    let mut first = true;
+    for arg in &event.args {
+        if !first  {
+            format_string.push_str(", ")
+        } else {
+            first = false
+        }
+        format_string.push_str(arg.debug_string());
+    }
+    format_string.push(')');
+    quote! {
+        ::std::eprintln!(#format_string, #interface_name, self.object(), #event_name, #(#args),*)
+    }
+}
+fn generate_request(request: &Request) -> TokenStream {
+    let request_name = format_ident!("{}", request.name.to_snake_case());
+    let parameters = request.args.iter().map(|arg| generate_parameter(arg));
+    quote! {
+        fn #request_name(&mut self, client: &mut ::wl::server::Client, #(#parameters),*) -> ::wl::Result<()>;
+    }
+}
+fn generate_parameter(arg: &Arg) -> TokenStream {
+    let arg_name = format_ident!("wl_{}", arg.name.to_snake_case());
+    let arg_type = arg.request_data_type();
+    quote! {
+        #arg_name: #arg_type
+    }
+}
+fn generate_request_dispatch(request: &Request, opcode: u16, interface: &Interface, bindings: &HashMap<String, Path>) -> TokenStream {
+    let mut request_name = format_ident!("{}", request.name.to_snake_case());
+    let interface_string = &interface.name;
+    request_name.set_span(bindings[interface_string].span());
+    let arg_names = request.args.iter().map(|arg| format_ident!("wl_{}", arg.name.to_snake_case()));
+    let arg_getters = request.args.iter().map(|arg| generate_arg_getter(arg, interface_string, bindings));
+    let debug_print = generate_request_debug_print(request, interface);
+    quote! {
+        #opcode => {
+            #(#arg_getters)*
+            if *::wl::DEBUG {
+                #debug_print
+            }
+            lease.#request_name(client #(, #arg_names)*)
+        }
+    }
+}
+fn generate_arg_getter(arg: &Arg, owning_interface: &String, bindings: &HashMap<String, Path>) -> TokenStream {
+    let arg_name = format_ident!("wl_{}", arg.name.to_snake_case());
+    let getter = arg.getter(owning_interface, bindings);
+    quote! {
+        let #arg_name = #getter;
+    }
+}
+fn generate_request_debug_print(request: &Request, interface: &Interface) -> TokenStream {
+    let interface_name = &interface.name;
+    let request_name = &request.name;
+    let args = request.args.iter().map(|arg| {
+        let arg_name = format_ident!("wl_{}", arg.name);
+        quote!{#arg_name}
+    });
+    let mut format_string = "{}@{}.{}(".to_string();
+    let mut first = true;
+    for arg in &request.args {
+        if !first  {
+            format_string.push_str(", ")
+        } else {
+            first = false
+        }
+        format_string.push_str(arg.debug_string());
+    }
+    format_string.push(')');
+    quote! {
+        ::std::eprintln!(#format_string, #interface_name, lease.object(), #request_name, #(#args),*)
+    }
 }

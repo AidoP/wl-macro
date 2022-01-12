@@ -1,11 +1,12 @@
 use std::{
     fs::File,
     io::Read,
-    path::{Path, PathBuf},
+    path::Path, collections::HashMap,
 };
+use heck::{CamelCase, SnakeCase};
 use serde::Deserialize;
-use proc_macro2::Span;
-use quote::quote;
+use quote::{quote, format_ident};
+use syn::{parse_quote, spanned::Spanned};
 
 // Note: owned strings are required as TOML allows string normalisation
 
@@ -19,22 +20,12 @@ pub struct Protocol {
     pub interfaces: Vec<Interface>
 }
 impl Protocol {
-    fn default_path(named: &str) -> PathBuf {
-        let mut path = if let Some(path) = option_env!("WL_PROTOCOLS") {
-            PathBuf::from(path)
-        } else {
-            PathBuf::from("protocol/")
-        };
-        path.push(named);
-        path.set_extension("toml");
-        path
-    }
     pub fn from_str(string: &str) -> Result<Self, toml::de::Error> {
         toml::from_str(string)
     }
-    pub fn load<P: AsRef<Path>>(named: &str) -> Self {
+    pub fn load<P: AsRef<Path>>(path: P) -> Self {
+        let path = path.as_ref();
         let mut protocol = String::new();
-        let path = &Self::default_path(named);
         let mut file = File::open(path).unwrap_or_else(|error| panic!("Unable to open protocol specification file {:?}: {:?}", path, error));
         file.read_to_string(&mut protocol).unwrap_or_else(|error| panic!("Unable to read protocol specification file {:?}: {:?}", path, error));
         Self::from_str(&protocol).unwrap_or_else(|error| panic!("Failed to parse protocol specification file {:?}: {:?}", path, error))
@@ -111,7 +102,7 @@ pub struct Arg {
     pub summary: Option<String>
 }
 impl Arg {
-    pub fn get_method(&self, version: u32) -> proc_macro2::TokenStream {
+    pub fn getter(&self, owning_interface: &String, bindings: &HashMap<String, syn::Path>) -> proc_macro2::TokenStream {
         match self.kind {
             DataType::Int => quote!{args.next_i32()?},
             DataType::Uint => quote!{args.next_u32()?},
@@ -120,63 +111,70 @@ impl Arg {
             DataType::Array => quote!{args.next_array()?},
             DataType::Fd => quote!{client.next_fd()?},
             DataType::Object => if let Some(_) = &self.interface {
-                quote!{&mut client.get(args.next_u32()?)?}
+                quote!{client.get(args.next_u32()?)?}
             } else {
                 quote!{client.get_any(args.next_u32()?)?}
             },
             DataType::NewId => if let Some(interface) = &self.interface {
-                quote!{args.next_new_id(#interface, #version)?}
+                let interface_binding = &bindings.get(&interface.to_snake_case());
+                if let Some(interface_binding) = interface_binding {
+                    quote!{args.next_new_id(#interface, #interface_binding::VERSION)?}
+                } else {
+                    let owner = owning_interface.to_camel_case();
+                    let to_implement = interface.to_camel_case();
+                    syn::Error::new(bindings[owning_interface].span(), format!("Interface {:?} depends on {:?}. Please specify an implementation for {:?}.", owner, to_implement, to_implement)).to_compile_error()
+                }
             } else {
                 quote!{args.next_dynamic_new_id()?}
             },
         }
     }
-    pub fn send_method(&self, span: Span) -> proc_macro2::TokenStream {
-        let arg = syn::Ident::new(&self.name, span);
+    pub fn pusher(&self) -> proc_macro2::TokenStream {
+        let arg = format_ident!("wl_{}", self.name);
         match self.kind {
-            DataType::Int => quote!{msg.push_i32(#arg)},
-            DataType::Uint => quote!{msg.push_u32(#arg)},
-            DataType::Fixed => quote!{msg.push_fixed(#arg)},
-            DataType::String => quote!{msg.push_str(#arg)},
-            DataType::Array => quote!{msg.push_array(#arg)},
+            DataType::Int => quote!{message.push_i32(#arg)},
+            DataType::Uint => quote!{message.push_u32(#arg)},
+            DataType::Fixed => quote!{message.push_fixed(#arg)},
+            DataType::String => quote!{message.push_str(#arg)},
+            DataType::Array => quote!{message.push_array(#arg)},
             DataType::Fd => quote!{client.push_fd(#arg)},
-            DataType::Object => quote!{{use wl::Object; msg.push_u32(#arg.object())}},
+            DataType::Object => quote!{{use ::wl::Object; message.push_u32(#arg.object())}},
             DataType::NewId => if let Some(_) = self.interface {
-                quote!{msg.push_new_id(#arg)}
+                quote!{message.push_new_id(#arg)}
             } else {
-                quote!{msg.push_dynamic_new_id(#arg)}
+                quote!{message.push_dynamic_new_id(#arg)}
             },
         }
     }
-    pub fn event_data_type(&self, _: Span) -> syn::Type {
-        use syn::parse_quote;
+    pub fn request_data_type(&self) -> syn::Type {
         match self.kind {
             DataType::Int => parse_quote!{ i32 },
             DataType::Uint => parse_quote!{ u32 },
-            DataType::Fixed => parse_quote!{ wl::Fixed },
-            DataType::String => parse_quote!{ std::string::String },
-            DataType::Array => parse_quote!{ wl::Array },
-            DataType::Fd => parse_quote!{ wl::Fd },
-            DataType::Object => parse_quote!{&mut (dyn wl::Object + 'static)},
-            DataType::NewId => parse_quote!{ wl::NewId }
+            DataType::Fixed => parse_quote!{ ::wl::Fixed },
+            DataType::String => parse_quote!{ ::std::string::String },
+            DataType::Array => parse_quote!{ ::wl::Array },
+            DataType::Fd => parse_quote!{ ::wl::Fd },
+            DataType::Object => {
+                if let Some(interface) = &self.interface {
+                    let interface = format_ident!("{}", interface.to_camel_case());
+                    parse_quote!{ ::wl::server::Lease<super::#interface> }
+                } else {
+                    parse_quote!{ ::wl::server::Lease<dyn ::std::any::Any> }
+                }
+            },
+            DataType::NewId => parse_quote!{ ::wl::NewId }
         }
     }
-    pub fn data_type(&self, span: Span) -> syn::Type {
-        use syn::parse_quote;
+    pub fn event_data_type(&self) -> syn::Type {
         match self.kind {
             DataType::Int => parse_quote!{ i32 },
             DataType::Uint => parse_quote!{ u32 },
-            DataType::Fixed => parse_quote!{ wl::Fixed },
-            DataType::String => parse_quote!{ std::string::String },
-            DataType::Array => parse_quote!{ wl::Array },
-            DataType::Fd => parse_quote!{ wl::Fd },
-            DataType::Object => if let Some(interface) = &self.interface {
-                let interface_ty = syn::Ident::new(&heck::CamelCase::to_camel_case(interface.as_str()), span);
-                parse_quote!{ &mut dyn #interface_ty }
-            } else {
-                parse_quote!{ wl::server::Lease<dyn std::any::Any> }
-            },
-            DataType::NewId => parse_quote!{ wl::NewId }
+            DataType::Fixed => parse_quote!{ ::wl::Fixed },
+            DataType::String => parse_quote!{ &str },
+            DataType::Array => parse_quote!{ ::wl::Array },
+            DataType::Fd => parse_quote!{ ::wl::Fd },
+            DataType::Object => parse_quote!{ &impl ::wl::Object },
+            DataType::NewId => parse_quote!{ ::wl::NewId }
         }
     }
     pub fn debug_string(&self) -> &'static str {
