@@ -12,7 +12,7 @@ use protocol::*;
 struct ProtocolModule {
     visibility: Visibility,
     ident: Ident,
-    bindings: HashMap<String, Path>
+    bindings: HashMap<String, Binding>
 }
 impl Parse for ProtocolModule {
     fn parse(input: ParseStream) -> syn::Result<Self> {
@@ -28,7 +28,7 @@ impl Parse for ProtocolModule {
             if bindings.contains_key(&interface) {
                 panic!("Duplicate definition of interface {:?}", interface.to_camel_case());
             }
-            bindings.insert(interface, binding.implementation);
+            bindings.insert(interface, binding);
         }
         Ok(Self {
             visibility,
@@ -37,20 +37,35 @@ impl Parse for ProtocolModule {
         })
     }
 }
-struct Binding {
+pub(crate) struct Binding {
+    is_external: bool,
     interface: Ident,
     implementation: Path
 }
 impl Parse for Binding {
     fn parse(input: ParseStream) -> syn::Result<Self> {
-        let _: Token![type] = input.parse()?;
-        let interface = input.parse()?;
-        let _: Token![=] = input.parse()?;
-        let implementation = input.parse()?;
-        Ok(Self {
-            interface,
-            implementation
-        })
+        let lookahead = input.lookahead1();
+        if lookahead.peek(Token![type]) {
+            let _: Token![type] = input.parse()?;
+            let interface = input.parse()?;
+            let _: Token![=] = input.parse()?;
+            let implementation = input.parse()?;
+            Ok(Self {
+                is_external: false,
+                interface,
+                implementation
+            })
+        } else {
+            let _: Token![use] = input.parse()?;
+            let implementation = input.parse()?;
+            let _: Token![as] = input.parse()?;
+            let interface = input.parse()?;
+            Ok(Self {
+                is_external: true,
+                interface,
+                implementation
+            })
+        }
     }
 }
 
@@ -89,17 +104,17 @@ pub fn server_protocol(attr: proc_macro::TokenStream, item: proc_macro::TokenStr
 
     // TODO: Reenable this error for types not marked as extern or something
     let interface_not_found_errors = bindings.iter().filter_map(|(interface, binding)|
-        if protocol.interfaces.iter().find(|known_interface| interface.to_snake_case() == known_interface.name.to_snake_case()).is_some() {
+        if protocol.interfaces.iter().find(|known_interface| interface.to_snake_case() == known_interface.name.to_snake_case()).is_some() || binding.is_external {
             None
         } else {
-            Some(syn::Error::new(binding.span(), format!("No interface named {:?}", interface.to_snake_case())).to_compile_error())
+            Some(syn::Error::new(binding.implementation.span(), format!("No interface named {:?}", interface.to_snake_case())).to_compile_error())
         }
     );
 
     quote! {
         #[allow(unused_variables)]
         #module_visibility mod #module_name {
-            //#(#interface_not_found_errors)*
+            #(#interface_not_found_errors)*
             pub const PROTOCOL: &'static str = #protocol_name;
             #(pub const COPYRIGHT: &'static str = #protocol_copyright;)*
             #(#interfaces)*
@@ -108,12 +123,12 @@ pub fn server_protocol(attr: proc_macro::TokenStream, item: proc_macro::TokenStr
     }.into()
 }
 
-fn generate_interface(interface: &Interface, bindings: &HashMap<String, Path>) -> TokenStream {
+fn generate_interface(interface: &Interface, bindings: &HashMap<String, Binding>) -> TokenStream {
     let interface_name = format_ident!("{}", interface.name.to_camel_case());
     let interface_description = interface.description.iter();
     let interface_version = interface.version;
     let interface_string = &interface.name;
-    let implementor_struct = &bindings[interface_string];
+    let implementor_struct = &bindings[interface_string].implementation;
     let events = interface.events.iter().enumerate().map(|(opcode, event)| generate_event(event, interface, opcode as u16));
     let requests = interface.requests.iter().map(|request| generate_request(request, interface, bindings));
     let request_dispatch = interface.requests.iter().enumerate().map(|(opcode, request)| generate_request_dispatch(request, opcode as u16, interface, bindings));
@@ -192,7 +207,7 @@ fn generate_event_debug_print(event: &Event, interface: &Interface) -> TokenStre
         ::std::eprintln!(#format_string, #interface_name, self.object(), #event_name, #(#args),*)
     }
 }
-fn generate_request(request: &Request, interface: &Interface, bindings: &HashMap<String, Path>) -> TokenStream {
+fn generate_request(request: &Request, interface: &Interface, bindings: &HashMap<String, Binding>) -> TokenStream {
     let request_name = format_ident!("r#{}", request.name.to_snake_case());
     let owning_interface = &interface.name.to_snake_case();
     let parameters = request.args.iter().map(|arg| generate_parameter(arg, owning_interface, bindings));
@@ -200,17 +215,17 @@ fn generate_request(request: &Request, interface: &Interface, bindings: &HashMap
         fn #request_name(&mut self, client: &mut ::wl::server::Client, #(#parameters),*) -> ::wl::server::Result<()>;
     }
 }
-fn generate_parameter(arg: &Arg, owning_interface: &String, bindings: &HashMap<String, Path>) -> TokenStream {
+fn generate_parameter(arg: &Arg, owning_interface: &String, bindings: &HashMap<String, Binding>) -> TokenStream {
     let arg_name = format_ident!("wl_{}", arg.name.to_snake_case());
     let arg_type = arg.request_data_type(owning_interface, bindings);
     quote! {
         #arg_name: #arg_type
     }
 }
-fn generate_request_dispatch(request: &Request, opcode: u16, interface: &Interface, bindings: &HashMap<String, Path>) -> TokenStream {
+fn generate_request_dispatch(request: &Request, opcode: u16, interface: &Interface, bindings: &HashMap<String, Binding>) -> TokenStream {
     let mut request_name = format_ident!("r#{}", request.name.to_snake_case());
     let interface_string = &interface.name;
-    request_name.set_span(bindings[interface_string].span());
+    request_name.set_span(bindings[interface_string].implementation.span());
     let arg_names = request.args.iter().map(|arg| format_ident!("wl_{}", arg.name.to_snake_case()));
     let arg_getters = request.args.iter().map(|arg| generate_arg_getter(arg, interface_string, bindings));
     let debug_print = generate_request_debug_print(request, interface);
@@ -224,7 +239,7 @@ fn generate_request_dispatch(request: &Request, opcode: u16, interface: &Interfa
         }
     }
 }
-fn generate_arg_getter(arg: &Arg, owning_interface: &String, bindings: &HashMap<String, Path>) -> TokenStream {
+fn generate_arg_getter(arg: &Arg, owning_interface: &String, bindings: &HashMap<String, Binding>) -> TokenStream {
     let arg_name = format_ident!("wl_{}", arg.name.to_snake_case());
     let getter = arg.getter(owning_interface, bindings);
     quote! {

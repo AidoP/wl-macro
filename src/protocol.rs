@@ -3,6 +3,7 @@ use std::{
     io::Read,
     path::Path, collections::HashMap,
 };
+use crate::Binding;
 use heck::{CamelCase, SnakeCase};
 use proc_macro2::TokenStream;
 use serde::Deserialize;
@@ -103,7 +104,7 @@ pub struct Arg {
     pub summary: Option<String>
 }
 impl Arg {
-    pub fn getter(&self, owning_interface: &String, bindings: &HashMap<String, syn::Path>) -> TokenStream {
+    pub(crate) fn getter(&self, owning_interface: &String, bindings: &HashMap<String, Binding>) -> TokenStream {
         match self.kind {
             DataType::Int => quote!{args.next_i32()?},
             DataType::Uint => quote!{args.next_u32()?},
@@ -117,20 +118,20 @@ impl Arg {
                 quote!{client.get_any(args.next_u32()?)?}
             },
             DataType::NewId => if let Some(interface) = &self.interface {
-                let interface_binding = &bindings.get(&interface.to_snake_case());
+                let interface_binding = &bindings.get(&interface.to_snake_case()).map(|b| &b.implementation);
                 if let Some(interface_binding) = interface_binding {
                     quote!{args.next_new_id(#interface, #interface_binding::VERSION)?}
                 } else {
                     let owner = owning_interface.to_camel_case();
                     let to_implement = interface.to_camel_case();
-                    syn::Error::new(bindings[owning_interface].span(), format!("Interface {:?} depends on {:?}. Please specify an implementation for {:?}.", owner, to_implement, to_implement)).to_compile_error()
+                    syn::Error::new(bindings[owning_interface].implementation.span(), format!("Interface {:?} depends on {:?}. Please specify an implementation for {:?}.", owner, to_implement, to_implement)).to_compile_error()
                 }
             } else {
                 quote!{args.next_dynamic_new_id()?}
             },
         }
     }
-    pub fn pusher(&self) -> proc_macro2::TokenStream {
+    pub(crate) fn pusher(&self) -> proc_macro2::TokenStream {
         let arg = format_ident!("wl_{}", self.name);
         match self.kind {
             DataType::Int => quote!{message.push_i32(#arg)},
@@ -147,7 +148,7 @@ impl Arg {
             },
         }
     }
-    pub fn request_data_type(&self, owning_interface: &String, bindings: &HashMap<String, syn::Path>) -> TokenStream {
+    pub(crate) fn request_data_type(&self, owning_interface: &String, bindings: &HashMap<String, Binding>) -> TokenStream {
         match self.kind {
             DataType::Int => quote!{ i32 },
             DataType::Uint => quote!{ u32 },
@@ -157,12 +158,12 @@ impl Arg {
             DataType::Fd => quote!{ ::wl::Fd },
             DataType::Object => {
                 if let Some(interface) = &self.interface {
-                    if let Some(implementation) = bindings.get(&interface.to_snake_case()) {
+                    if let Some(Binding { implementation, ..}) = bindings.get(&interface.to_snake_case()) {
                         quote!{ ::wl::server::Lease<#implementation> }
                     } else {
                         let owner = owning_interface.to_camel_case();
                         let to_implement = interface.to_camel_case();
-                        syn::Error::new(bindings[owning_interface].span(), format!("Interface {:?} depends on {:?}. Please specify an implementation for {:?}.", owner, to_implement, to_implement)).to_compile_error()
+                        syn::Error::new(bindings[owning_interface].implementation.span(), format!("Interface {:?} depends on {:?}. Please specify an implementation for {:?}.", owner, to_implement, to_implement)).to_compile_error()
                     }
                 } else {
                     quote!{ ::wl::server::Lease<dyn ::std::any::Any> }
