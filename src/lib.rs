@@ -87,6 +87,7 @@ pub fn server_protocol(attr: proc_macro::TokenStream, item: proc_macro::TokenStr
         .map(|interface| generate_interface(interface, bindings));
     let enums = protocol.interfaces.iter().map(|interface| generate_enums(interface));
 
+    // TODO: Reenable this error for types not marked as extern or something
     let interface_not_found_errors = bindings.iter().filter_map(|(interface, binding)|
         if protocol.interfaces.iter().find(|known_interface| interface.to_snake_case() == known_interface.name.to_snake_case()).is_some() {
             None
@@ -98,7 +99,7 @@ pub fn server_protocol(attr: proc_macro::TokenStream, item: proc_macro::TokenStr
     quote! {
         #[allow(unused_variables)]
         #module_visibility mod #module_name {
-            #(#interface_not_found_errors)*
+            //#(#interface_not_found_errors)*
             pub const PROTOCOL: &'static str = #protocol_name;
             #(pub const COPYRIGHT: &'static str = #protocol_copyright;)*
             #(#interfaces)*
@@ -114,7 +115,7 @@ fn generate_interface(interface: &Interface, bindings: &HashMap<String, Path>) -
     let interface_string = &interface.name;
     let implementor_struct = &bindings[interface_string];
     let events = interface.events.iter().enumerate().map(|(opcode, event)| generate_event(event, interface, opcode as u16));
-    let requests = interface.requests.iter().map(|request| generate_request(request));
+    let requests = interface.requests.iter().map(|request| generate_request(request, interface, bindings));
     let request_dispatch = interface.requests.iter().enumerate().map(|(opcode, request)| generate_request_dispatch(request, opcode as u16, interface, bindings));
     quote!{
         #(#[doc = #interface_description])*
@@ -146,7 +147,7 @@ fn generate_interface(interface: &Interface, bindings: &HashMap<String, Path>) -
 }
 
 fn generate_event(event: &Event, interface: &Interface, opcode: u16) -> TokenStream {
-    let event_name = format_ident!("{}", event.name.to_snake_case());
+    let event_name = format_ident!("r#{}", event.name.to_snake_case());
     let parameters = event.args.iter().map(|arg| generate_event_parameter(arg));
     let debug_print = generate_event_debug_print(event, interface);
     let arg_pushers = event.args.iter().map(|arg| arg.pusher());
@@ -191,22 +192,23 @@ fn generate_event_debug_print(event: &Event, interface: &Interface) -> TokenStre
         ::std::eprintln!(#format_string, #interface_name, self.object(), #event_name, #(#args),*)
     }
 }
-fn generate_request(request: &Request) -> TokenStream {
-    let request_name = format_ident!("{}", request.name.to_snake_case());
-    let parameters = request.args.iter().map(|arg| generate_parameter(arg));
+fn generate_request(request: &Request, interface: &Interface, bindings: &HashMap<String, Path>) -> TokenStream {
+    let request_name = format_ident!("r#{}", request.name.to_snake_case());
+    let owning_interface = &interface.name.to_snake_case();
+    let parameters = request.args.iter().map(|arg| generate_parameter(arg, owning_interface, bindings));
     quote! {
         fn #request_name(&mut self, client: &mut ::wl::server::Client, #(#parameters),*) -> ::wl::server::Result<()>;
     }
 }
-fn generate_parameter(arg: &Arg) -> TokenStream {
+fn generate_parameter(arg: &Arg, owning_interface: &String, bindings: &HashMap<String, Path>) -> TokenStream {
     let arg_name = format_ident!("wl_{}", arg.name.to_snake_case());
-    let arg_type = arg.request_data_type();
+    let arg_type = arg.request_data_type(owning_interface, bindings);
     quote! {
         #arg_name: #arg_type
     }
 }
 fn generate_request_dispatch(request: &Request, opcode: u16, interface: &Interface, bindings: &HashMap<String, Path>) -> TokenStream {
-    let mut request_name = format_ident!("{}", request.name.to_snake_case());
+    let mut request_name = format_ident!("r#{}", request.name.to_snake_case());
     let interface_string = &interface.name;
     request_name.set_span(bindings[interface_string].span());
     let arg_names = request.args.iter().map(|arg| format_ident!("wl_{}", arg.name.to_snake_case()));
@@ -283,13 +285,13 @@ fn generate_enum(e: &Enum, interface: &Interface) -> TokenStream {
         #[derive(::std::fmt::Debug, ::std::marker::Copy, ::std::clone::Clone, ::std::cmp::Eq, ::std::cmp::PartialEq)]
         pub struct #enum_name(u32);
         impl #enum_name {
-            pub const NAME: &'static str = #enum_wl_name;
+            pub const ENUM_NAME: &'static str = #enum_wl_name;
             #(#entries;)*
             pub fn new(value: u32) -> ::wl::server::Result<Self> {
                 use ::std::convert::Into;
                 match value {
                     #(#entry_constructors,)*
-                    _ => Err(::wl::DispatchError::NoVariant { name: Self::NAME, variant: value }.into())
+                    _ => Err(::wl::DispatchError::NoVariant { name: Self::ENUM_NAME, variant: value }.into())
                 }
             }
         }

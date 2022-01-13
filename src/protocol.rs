@@ -4,6 +4,7 @@ use std::{
     path::Path, collections::HashMap,
 };
 use heck::{CamelCase, SnakeCase};
+use proc_macro2::TokenStream;
 use serde::Deserialize;
 use quote::{quote, format_ident};
 use syn::{parse_quote, spanned::Spanned};
@@ -102,7 +103,7 @@ pub struct Arg {
     pub summary: Option<String>
 }
 impl Arg {
-    pub fn getter(&self, owning_interface: &String, bindings: &HashMap<String, syn::Path>) -> proc_macro2::TokenStream {
+    pub fn getter(&self, owning_interface: &String, bindings: &HashMap<String, syn::Path>) -> TokenStream {
         match self.kind {
             DataType::Int => quote!{args.next_i32()?},
             DataType::Uint => quote!{args.next_u32()?},
@@ -137,7 +138,7 @@ impl Arg {
             DataType::Fixed => quote!{message.push_fixed(#arg)},
             DataType::String => quote!{message.push_str(#arg)},
             DataType::Array => quote!{message.push_array(#arg)},
-            DataType::Fd => quote!{client.push_fd(#arg)},
+            DataType::Fd => quote!{message.push_fd(#arg)},
             DataType::Object => quote!{{use ::wl::Object; message.push_u32(#arg.object())}},
             DataType::NewId => if let Some(_) = self.interface {
                 quote!{message.push_new_id(#arg)}
@@ -146,23 +147,28 @@ impl Arg {
             },
         }
     }
-    pub fn request_data_type(&self) -> syn::Type {
+    pub fn request_data_type(&self, owning_interface: &String, bindings: &HashMap<String, syn::Path>) -> TokenStream {
         match self.kind {
-            DataType::Int => parse_quote!{ i32 },
-            DataType::Uint => parse_quote!{ u32 },
-            DataType::Fixed => parse_quote!{ ::wl::Fixed },
-            DataType::String => parse_quote!{ ::std::string::String },
-            DataType::Array => parse_quote!{ ::wl::Array },
-            DataType::Fd => parse_quote!{ ::wl::Fd },
+            DataType::Int => quote!{ i32 },
+            DataType::Uint => quote!{ u32 },
+            DataType::Fixed => quote!{ ::wl::Fixed },
+            DataType::String => quote!{ ::std::string::String },
+            DataType::Array => quote!{ ::wl::Array },
+            DataType::Fd => quote!{ ::wl::Fd },
             DataType::Object => {
                 if let Some(interface) = &self.interface {
-                    let interface = format_ident!("{}", interface.to_camel_case());
-                    parse_quote!{ ::wl::server::Lease<super::#interface> }
+                    if let Some(implementation) = bindings.get(&interface.to_snake_case()) {
+                        quote!{ ::wl::server::Lease<#implementation> }
+                    } else {
+                        let owner = owning_interface.to_camel_case();
+                        let to_implement = interface.to_camel_case();
+                        syn::Error::new(bindings[owning_interface].span(), format!("Interface {:?} depends on {:?}. Please specify an implementation for {:?}.", owner, to_implement, to_implement)).to_compile_error()
+                    }
                 } else {
-                    parse_quote!{ ::wl::server::Lease<dyn ::std::any::Any> }
+                    quote!{ ::wl::server::Lease<dyn ::std::any::Any> }
                 }
             },
-            DataType::NewId => parse_quote!{ ::wl::NewId }
+            DataType::NewId => quote!{ ::wl::NewId }
         }
     }
     pub fn event_data_type(&self) -> syn::Type {
