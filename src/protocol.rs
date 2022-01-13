@@ -111,7 +111,7 @@ impl Arg {
             DataType::Fixed => quote!{args.next_fixed()?},
             DataType::String => quote!{args.next_str()?},
             DataType::Array => quote!{args.next_array()?},
-            DataType::Fd => quote!{client.next_fd()?},
+            DataType::Fd => quote!{client.next_file()?},
             DataType::Object => if let Some(_) = &self.interface {
                 quote!{client.get(args.next_u32()?)?}
             } else {
@@ -139,7 +139,7 @@ impl Arg {
             DataType::Fixed => quote!{message.push_fixed(#arg)},
             DataType::String => quote!{message.push_str(#arg)},
             DataType::Array => quote!{message.push_array(#arg)},
-            DataType::Fd => quote!{message.push_fd(#arg)},
+            DataType::Fd => quote!{message.push_file(#arg)},
             DataType::Object => quote!{{use ::wl::Object; message.push_u32(#arg.object())}},
             DataType::NewId => if let Some(_) = self.interface {
                 quote!{message.push_new_id(#arg)}
@@ -155,7 +155,7 @@ impl Arg {
             DataType::Fixed => quote!{ ::wl::Fixed },
             DataType::String => quote!{ ::std::string::String },
             DataType::Array => quote!{ ::wl::Array },
-            DataType::Fd => quote!{ ::wl::Fd },
+            DataType::Fd => quote!{ ::std::fs::File },
             DataType::Object => {
                 if let Some(interface) = &self.interface {
                     if let Some(Binding { implementation, ..}) = bindings.get(&interface.to_snake_case()) {
@@ -179,7 +179,7 @@ impl Arg {
             DataType::Fixed => parse_quote!{ ::wl::Fixed },
             DataType::String => parse_quote!{ &str },
             DataType::Array => parse_quote!{ ::wl::Array },
-            DataType::Fd => parse_quote!{ ::wl::Fd },
+            DataType::Fd => parse_quote!{ &::std::fs::File },
             DataType::Object => parse_quote!{ &impl ::wl::Object },
             DataType::NewId => parse_quote!{ ::wl::NewId }
         }
@@ -187,7 +187,7 @@ impl Arg {
     pub fn debug_string(&self) -> &'static str {
         match self.kind {
             DataType::NewId if self.interface.is_none() => "dyn {}",
-            DataType::String => "{:?}",
+            DataType::String | DataType::Fd => "{:?}",
             _ => "{}"
         }
     }
