@@ -163,10 +163,15 @@ fn generate_interface(interface: &Interface, bindings: &HashMap<String, Binding>
 
 fn generate_event(event: &Event, interface: &Interface, opcode: u16) -> TokenStream {
     let event_name = format_ident!("r#{}", event.name.to_snake_case());
+    let event_summary = event.summary.iter();
+    let event_description = event.description.iter();
     let parameters = event.args.iter().map(|arg| generate_event_parameter(arg));
     let debug_print = generate_event_debug_print(event, interface);
     let arg_pushers = event.args.iter().map(|arg| arg.pusher());
     quote! {
+        #(#[doc = #event_summary])*
+        #[doc = "\n"]
+        #(#[doc = #event_description])*
         fn #event_name(&mut self, client: &mut ::wl::server::Client, #(#parameters),*) -> ::wl::server::Result<()> {
             use ::wl::Object;
             if *::wl::DEBUG {
@@ -209,9 +214,14 @@ fn generate_event_debug_print(event: &Event, interface: &Interface) -> TokenStre
 }
 fn generate_request(request: &Request, interface: &Interface, bindings: &HashMap<String, Binding>) -> TokenStream {
     let request_name = format_ident!("r#{}", request.name.to_snake_case());
+    let request_summary = request.summary.iter();
+    let request_description = request.description.iter();
     let owning_interface = &interface.name.to_snake_case();
     let parameters = request.args.iter().map(|arg| generate_parameter(arg, owning_interface, bindings));
     quote! {
+        #(#[doc = #request_summary])*
+        #[doc = "\n"]
+        #(#[doc = #request_description])*
         fn #request_name(&mut self, client: &mut ::wl::server::Client, #(#parameters),*) -> ::wl::server::Result<()>;
     }
 }
@@ -276,6 +286,8 @@ fn generate_enums(interface: &Interface) -> TokenStream {
 }
 fn generate_enum(e: &Enum, interface: &Interface) -> TokenStream {
     let enum_name = format_ident!("{}{}", interface.name.to_camel_case(), e.name.to_camel_case());
+    let enum_summary = e.summary.iter();
+    let enum_description = e.description.iter();
     let enum_wl_name = format!("{}.{}", interface.name, e.name);
     let normalise_entry_name = |name: &str| if name.chars().next().map(|c| c.is_alphabetic()).unwrap_or(false) {
         name.to_shouty_snake_case()
@@ -284,8 +296,13 @@ fn generate_enum(e: &Enum, interface: &Interface) -> TokenStream {
     };
     let entries = e.entries.iter().map(|entry| {
         let entry_name = format_ident!("{}", normalise_entry_name(&entry.name));
+        let entry_summary = entry.summary.iter();
+        let entry_description = entry.description.iter();
         let value = entry.value;
         quote!{
+            #(#[doc = #entry_summary])*
+            #[doc = "\n"]
+            #(#[doc = #entry_description])*
             pub const #entry_name: u32 = #value
         }
     });
@@ -299,6 +316,9 @@ fn generate_enum(e: &Enum, interface: &Interface) -> TokenStream {
     quote! {
         #[derive(::std::fmt::Debug, ::std::marker::Copy, ::std::clone::Clone, ::std::cmp::Eq, ::std::cmp::PartialEq)]
         pub struct #enum_name(u32);
+        #(#[doc = #enum_summary])*
+        #[doc = "\n"]
+        #(#[doc = #enum_description])*
         impl #enum_name {
             pub const ENUM_NAME: &'static str = #enum_wl_name;
             #(#entries;)*
