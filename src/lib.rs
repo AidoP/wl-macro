@@ -98,7 +98,7 @@ pub fn server_protocol(attr: proc_macro::TokenStream, item: proc_macro::TokenStr
     let protocol_name = protocol.name.to_snake_case();
     let protocol_copyright = protocol.copyright.iter();
     let interfaces = protocol.interfaces.iter()
-        .filter(|interface| bindings.contains_key(&interface.name.to_snake_case()))
+        .filter(|interface| bindings.get(&interface.name.to_snake_case()).map(|b| !b.is_external).unwrap_or(false))
         .map(|interface| generate_interface(interface, bindings));
     let enums = protocol.interfaces.iter().map(|interface| generate_enums(interface));
 
