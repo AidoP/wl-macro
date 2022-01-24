@@ -96,6 +96,8 @@ pub enum RequestType {
 #[derive(Clone, Debug, Deserialize)]
 pub struct Arg {
     pub name: String,
+    #[serde(rename = "allow-null", default)]
+    pub nullable: bool,
     #[serde(rename = "type")]
     pub kind: DataType,
     pub interface: Option<String>,
@@ -113,9 +115,35 @@ impl Arg {
             DataType::Array => quote!{args.next_array()?},
             DataType::Fd => quote!{client.next_file()?},
             DataType::Object => if let Some(_) = &self.interface {
-                quote!{client.get(args.next_u32()?)?}
+                if self.nullable {
+                    quote!{
+                        {
+                            let id = args.next_u32()?;
+                            if id == 0 {
+                                ::wl::Nullable::Null
+                            } else {
+                                ::wl::Nullable::Object(client.get(id)?)
+                            }
+                        }
+                    }
+                } else {
+                    quote!{client.get(args.next_u32()?)?}
+                }
             } else {
-                quote!{client.get_any(args.next_u32()?)?}
+                if self.nullable {
+                    quote!{
+                        {
+                            let id = args.next_u32()?;
+                            if id == 0 {
+                                ::wl::Nullable::Null
+                            } else {
+                                ::wl::Nullable::Object(client.get_any(id)?)
+                            }
+                        }
+                    }
+                } else {
+                    quote!{client.get_any(args.next_u32()?)?}
+                }
             },
             DataType::NewId => if let Some(interface) = &self.interface {
                 let interface_binding = &bindings.get(&interface.to_snake_case()).map(|b| &b.implementation);
@@ -159,14 +187,22 @@ impl Arg {
             DataType::Object => {
                 if let Some(interface) = &self.interface {
                     if let Some(Binding { implementation, ..}) = bindings.get(&interface.to_snake_case()) {
-                        quote!{ ::wl::server::Lease<#implementation> }
+                        if self.nullable {
+                            quote!{ ::wl::Nullable<::wl::server::Lease<#implementation>> }
+                        } else {
+                            quote!{ ::wl::server::Lease<#implementation> }
+                        }
                     } else {
                         let owner = owning_interface.to_camel_case();
                         let to_implement = interface.to_camel_case();
                         syn::Error::new(bindings[owning_interface].implementation.span(), format!("Interface {:?} depends on {:?}. Please specify an implementation for {:?}.", owner, to_implement, to_implement)).to_compile_error()
                     }
                 } else {
-                    quote!{ ::wl::server::Lease<dyn ::std::any::Any> }
+                    if self.nullable {
+                        quote!{ ::wl::Nullable<::wl::server::Lease<dyn ::std::any::Any>> }
+                    } else {
+                        quote!{ ::wl::server::Lease<dyn ::std::any::Any> }
+                    }
                 }
             },
             DataType::NewId => quote!{ ::wl::NewId }
@@ -180,7 +216,11 @@ impl Arg {
             DataType::String => parse_quote!{ &str },
             DataType::Array => parse_quote!{ ::wl::Array },
             DataType::Fd => parse_quote!{ &::std::fs::File },
-            DataType::Object => parse_quote!{ &impl ::wl::Object },
+            DataType::Object => if self.nullable {
+                parse_quote!{ ::wl::Nullable<&dyn ::wl::Object> }
+            } else {
+                parse_quote!{ &dyn ::wl::Object }
+            },
             DataType::NewId => parse_quote!{ ::wl::NewId }
         }
     }

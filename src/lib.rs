@@ -150,7 +150,7 @@ fn generate_interface(interface: &Interface, bindings: &HashMap<String, Binding>
                 let mut args = message.args();
                 match message.opcode {
                     #(#request_dispatch)*
-                    _ => Err(::wl::DispatchError::InvalidRequest {
+                    _ => ::std::result::Result::Err(::wl::DispatchError::InvalidRequest {
                         opcode: message.opcode,
                         object: lease.object(),
                         interface: Self::INTERFACE
@@ -310,7 +310,7 @@ fn generate_enum(e: &Enum, interface: &Interface) -> TokenStream {
         let entry_name = format_ident!("{}", normalise_entry_name(&entry.name));
         let value = entry.value;
         quote!{
-            #value => Ok(Self(Self::#entry_name))
+            #value => ::std::result::Result::Ok(Self(Self::#entry_name))
         }
     });
     quote! {
@@ -326,7 +326,7 @@ fn generate_enum(e: &Enum, interface: &Interface) -> TokenStream {
                 use ::std::convert::Into;
                 match value {
                     #(#entry_constructors,)*
-                    _ => Err(::wl::DispatchError::NoVariant { name: Self::ENUM_NAME, variant: value }.into())
+                    _ => ::std::result::Result::Err(::wl::DispatchError::NoVariant { name: Self::ENUM_NAME, variant: value }.into())
                 }
             }
         }
