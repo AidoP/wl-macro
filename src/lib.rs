@@ -100,7 +100,10 @@ pub fn server_protocol(attr: proc_macro::TokenStream, item: proc_macro::TokenStr
     let interfaces = protocol.interfaces.iter()
         .filter(|interface| bindings.get(&interface.name.to_snake_case()).map(|b| !b.is_external).unwrap_or(false))
         .map(|interface| generate_interface(interface, bindings));
-    let enums = protocol.interfaces.iter().map(|interface| generate_enums(interface));
+    let enums = protocol.interfaces.iter()
+        .filter(|interface| bindings.get(&interface.name.to_snake_case())
+        .map(|b| !b.is_external).unwrap_or(false))
+        .map(|interface| generate_enums(interface));
 
     // TODO: Reenable this error for types not marked as extern or something
     let interface_not_found_errors = bindings.iter().filter_map(|(interface, binding)|
